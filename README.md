@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # tailscale-keepalive
 
 Keeps a Tailscale link from dying of *idle* by sending one tiny ICMP echo to the
@@ -231,5 +233,3 @@ checks on every push and pull request.
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-[中文说明](README.zh-CN.md)

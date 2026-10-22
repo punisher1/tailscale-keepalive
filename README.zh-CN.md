@@ -1,3 +1,5 @@
+[English](README.md) | **简体中文**
+
 # tailscale-keepalive
 
 定期向对端的 Tailscale IP 发一个很小的 ICMP echo，防止链路因为*空闲*而在 NAT
@@ -212,5 +214,3 @@ cargo test
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
-
-[English](README.md)
