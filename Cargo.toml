@@ -1,0 +1,30 @@
+[package]
+name = "tailscale-keepalive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Keeps NAT mappings on a Tailscale path alive with periodic ICMP probes"
+license = "MIT"
+repository = "https://github.com/punisher1/tailscale-keepalive"
+keywords = ["tailscale", "nat", "keepalive", "icmp", "wireguard"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+fs4 = "1"
+serde = { version = "1", features = ["derive"] }
+surge-ping = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+toml = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+
+[profile.release]
+strip = true
+lto = "thin"
