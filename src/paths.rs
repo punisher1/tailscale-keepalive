@@ -21,21 +21,24 @@ pub fn is_privileged() -> bool {
     false
 }
 
-/// Default config file path.
+/// Default config file path, ignoring any user override.
 ///
-/// Resolution order: `TS_KEEPALIVE_CONFIG`, then a system-wide path when
-/// privileged, then a per-user path.
+/// Privileged processes get a system-wide path, which is what the installed
+/// service uses as well.
 pub fn default_config_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("TS_KEEPALIVE_CONFIG").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(path));
-    }
-
     #[cfg(unix)]
     if is_privileged() {
         return Some(PathBuf::from("/etc").join(APP_DIR).join(CONFIG_FILE));
     }
 
     config_dir().map(|dir| dir.join(CONFIG_FILE))
+}
+
+/// Config file path from `TS_KEEPALIVE_CONFIG`, if it is set and non-empty.
+pub fn env_config_path() -> Option<PathBuf> {
+    std::env::var_os("TS_KEEPALIVE_CONFIG")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(windows)]

@@ -66,12 +66,8 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Status => {
             logging::init(None, cli.verbose, true)?;
             let report = service::status()?;
-            let settings = build_settings(&cli).ok();
-            if cli.output == OutputFormat::Json {
-                print_status_json(&report, settings.as_ref());
-            } else {
-                print_status(&report, settings.as_ref(), cli.output);
-            }
+            let settings = build_settings_in(&cli, ConfigScope::Service);
+            print_status(&report, &settings, cli.output);
             Ok(())
         }
         Command::Config => {
@@ -83,9 +79,22 @@ fn dispatch(cli: Cli) -> Result<()> {
     }
 }
 
+/// Which config file to fall back to when the user did not name one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigScope {
+    /// Foreground runs, `install`, `config`: the user-facing location.
+    Default,
+    /// `status`: the file the installed service actually reads, when present.
+    Service,
+}
+
 /// Resolve settings from all four layers, highest priority first.
 fn build_settings(cli: &Cli) -> Result<Settings> {
-    let config_path = cli.config.clone().or_else(paths::default_config_path);
+    build_settings_in(cli, ConfigScope::Default)
+}
+
+fn build_settings_in(cli: &Cli, scope: ConfigScope) -> Result<Settings> {
+    let config_path = config_path_for(cli, scope);
 
     let file_layer = match &config_path {
         Some(path) => settings::load_file(path)?
@@ -104,6 +113,37 @@ fn build_settings(cli: &Cli) -> Result<Settings> {
     };
 
     Settings::resolve(&[file_layer, env_layer, cli_layer])
+}
+
+/// Pick the config file to read.
+///
+/// An explicit `--config` wins, then `TS_KEEPALIVE_CONFIG`, then — for
+/// `status` only — the file the service was installed with, then the default
+/// location. Without that service step, `status` would report the user-level
+/// defaults and hide the settings the running service is actually using.
+fn config_path_for(cli: &Cli, scope: ConfigScope) -> Option<PathBuf> {
+    let service_path = (scope == ConfigScope::Service)
+        .then(|| service::ServicePaths::detect().ok())
+        .flatten()
+        .map(|paths| paths.config)
+        .filter(|path| path.exists());
+
+    choose_config_path(
+        cli.config.clone(),
+        paths::env_config_path(),
+        service_path,
+        paths::default_config_path(),
+    )
+}
+
+/// Pure form of the choice above: first candidate that is set wins.
+fn choose_config_path(
+    cli: Option<PathBuf>,
+    env: Option<PathBuf>,
+    service: Option<PathBuf>,
+    default: Option<PathBuf>,
+) -> Option<PathBuf> {
+    cli.or(env).or(service).or(default)
 }
 
 fn lock_path() -> PathBuf {
@@ -158,9 +198,14 @@ pub fn service_run(shutdown: watch::Receiver<bool>) -> Result<()> {
 
 fn print_status(
     report: &service::ServiceReport,
-    settings: Option<&Settings>,
-    _format: OutputFormat,
+    settings: &Result<Settings>,
+    format: OutputFormat,
 ) {
+    if format == OutputFormat::Json {
+        print_status_json(report, settings);
+        return;
+    }
+
     println!("service: {}", report.state.as_str());
     println!("backend: {}", service::platform_name());
     println!("detail:  {}", report.detail);
@@ -169,35 +214,44 @@ fn print_status(
         Err(err) => println!("config:  <unavailable: {err}>"),
     }
     match settings {
-        Some(s) => println!("effective settings: {}", s.summary()),
-        None => println!("effective settings: <no target configured>"),
+        Ok(s) => println!("effective settings: {}", s.summary()),
+        // Say why, instead of pretending nothing is configured.
+        Err(err) => println!("effective settings: <unavailable: {err:#}>"),
     }
 }
 
-fn print_status_json(report: &service::ServiceReport, settings: Option<&Settings>) {
-    let settings_json = match settings {
-        Some(s) => format!(
-            r#"{{"target":"{}","interval":{},"timeout":{},"fail_threshold":{},"log_file":{},"verbose":{}}}"#,
-            escape_json(&s.target.to_string()),
-            s.interval.as_secs(),
-            s.timeout.as_secs(),
-            s.fail_threshold,
-            match &s.log_file {
-                Some(p) => format!("\"{}\"", escape_json(&p.display().to_string())),
-                None => "null".to_string(),
-            },
-            s.verbose
+fn print_status_json(report: &service::ServiceReport, settings: &Result<Settings>) {
+    let (settings_json, settings_error) = match settings {
+        Ok(s) => (settings_to_json(s), "null".to_string()),
+        Err(err) => (
+            "null".to_string(),
+            format!("\"{}\"", escape_json(&format!("{err:#}"))),
         ),
-        None => "null".to_string(),
     };
 
     println!(
-        r#"{{"service":{{"state":"{}","backend":"{}","detail":"{}"}},"settings":{}}}"#,
+        r#"{{"service":{{"state":"{}","backend":"{}","detail":"{}"}},"settings":{},"settings_error":{}}}"#,
         report.state.as_str(),
         escape_json(service::platform_name()),
         escape_json(&report.detail),
-        settings_json
+        settings_json,
+        settings_error
     );
+}
+
+fn settings_to_json(s: &Settings) -> String {
+    format!(
+        r#"{{"target":"{}","interval":{},"timeout":{},"fail_threshold":{},"log_file":{},"verbose":{}}}"#,
+        escape_json(&s.target.to_string()),
+        s.interval.as_secs(),
+        s.timeout.as_secs(),
+        s.fail_threshold,
+        match &s.log_file {
+            Some(p) => format!("\"{}\"", escape_json(&p.display().to_string())),
+            None => "null".to_string(),
+        },
+        s.verbose
+    )
 }
 
 fn escape_json(input: &str) -> String {
@@ -214,4 +268,73 @@ fn escape_json(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(s))
+    }
+
+    #[test]
+    fn explicit_cli_path_beats_everything() {
+        let chosen = choose_config_path(
+            p("/cli.toml"),
+            p("/env.toml"),
+            p("/service.toml"),
+            p("/default.toml"),
+        );
+        assert_eq!(chosen, p("/cli.toml"));
+    }
+
+    #[test]
+    fn env_beats_service_and_default() {
+        let chosen =
+            choose_config_path(None, p("/env.toml"), p("/service.toml"), p("/default.toml"));
+        assert_eq!(chosen, p("/env.toml"));
+    }
+
+    #[test]
+    fn service_config_beats_default() {
+        // This is the bug that made `status` report "no target configured":
+        // the service file was never consulted, so the default won.
+        let chosen = choose_config_path(None, None, p("/service.toml"), p("/default.toml"));
+        assert_eq!(chosen, p("/service.toml"));
+    }
+
+    #[test]
+    fn default_is_the_last_resort() {
+        let chosen = choose_config_path(None, None, None, p("/default.toml"));
+        assert_eq!(chosen, p("/default.toml"));
+    }
+
+    #[test]
+    fn no_candidates_means_no_file() {
+        assert_eq!(choose_config_path(None, None, None, None), None);
+    }
+
+    #[test]
+    fn json_escaping_covers_quotes_and_controls() {
+        assert_eq!(escape_json(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(escape_json(r"a\b"), r"a\\b");
+        assert_eq!(escape_json("a\nb"), "a\\nb");
+        assert_eq!(escape_json("\u{1}"), "\\u0001");
+    }
+
+    #[test]
+    fn settings_json_renders_null_for_a_missing_log_file() {
+        let settings = Settings {
+            target: "100.0.0.1".parse().unwrap(),
+            interval: std::time::Duration::from_secs(25),
+            timeout: std::time::Duration::from_secs(2),
+            fail_threshold: 3,
+            log_file: None,
+            verbose: false,
+        };
+        let json = settings_to_json(&settings);
+        assert!(json.contains(r#""target":"100.0.0.1""#), "{json}");
+        assert!(json.contains(r#""log_file":null"#), "{json}");
+    }
 }
